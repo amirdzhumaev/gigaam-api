@@ -1,0 +1,52 @@
+name: CI
+on:
+  push:
+    branches: [main, "codex/**"]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        database: [sqlite, postgres]
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_DB: app_test
+          POSTGRES_USER: app_test
+          POSTGRES_PASSWORD: ci-disposable-password
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U app_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements-dev.lock && pip install --no-deps -e .
+      - name: Select disposable database
+        if: matrix.database == 'postgres'
+        run: |
+          echo "TEST_DATABASE_URL=postgresql+psycopg://app_test:ci-disposable-password@localhost:5432/app_test" >> "$GITHUB_ENV"
+          echo "ASR_DATABASE_URL=postgresql+psycopg://app_test:ci-disposable-password@localhost:5432/app_test" >> "$GITHUB_ENV"
+      - run: alembic upgrade head && alembic check
+      - run: ruff check . && ruff format --check .
+      - run: pytest -q
+      - run: python scripts/export_openapi.py && git diff --exit-code docs/openapi.json
+  container:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate compose configuration
+        run: cp .env.example .env && docker compose config --quiet
+      - name: Build API image
+        run: docker build --target api -t gigaam-api:ci .
+      - name: Build and import worker runtime without downloading weights
+        run: |
+          docker build --target worker -t gigaam-worker:ci .
+          docker run --rm gigaam-worker:ci python -c 'import onnx_asr; import gigaam_api.worker'
