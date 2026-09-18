@@ -114,3 +114,18 @@ def test_invalid_timestamps_rejected(api, worker):
         },
     }
     assert worker.post(f"/internal/jobs/{ident}/complete", json=body).status_code == 422
+
+
+def test_cancellation_blocks_late_upload_without_known_job_id(api):
+    assert api.delete("/v1/requests/late-upload").status_code == 204
+    assert upload(api, key="late-upload").status_code == 409
+    assert not list((api.app.state.settings.storage / "media").iterdir())
+    assert api.delete("/v1/requests/late-upload").status_code == 204
+
+
+def test_cancellation_recovers_after_lost_submission_response(api):
+    ident = upload(api, key="lost-response").json()["id"]
+    assert api.delete("/v1/requests/lost-response").status_code == 204
+    assert api.get(f"/v1/transcriptions/{ident}").status_code == 404
+    assert not list((api.app.state.settings.storage / "media").iterdir())
+    assert api.delete(f"/v1/transcriptions/{ident}").status_code == 204

@@ -83,6 +83,11 @@ curl -H "Authorization: Bearer $ASR_TOKEN" \
 | GET | `/v1/transcriptions/{id}/result` | Текст и сегменты |
 | POST | `/v1/transcriptions/{id}/retry` | Повтор задачи в состоянии failed |
 | DELETE | `/v1/transcriptions/{id}` | Удалить источник и результат |
+| DELETE | `/v1/requests/{idempotency_key}` | Отменить загрузку даже при потере ответа с job ID |
+
+Отмена по ключу создаёт tombstone: последующие загрузки с этим ключом отклоняются.
+Это позволяет notes-backend удалить источник при сбое между приёмом файла ASR и сохранением его ID.
+DELETE можно безопасно повторять, в том числе после временной ошибки файловой системы.
 
 Контракт: [OpenAPI](docs/openapi.json). Время создания/обновления — Unix seconds UTC;
 таймкоды — секунды от начала аудио. Пример результата:

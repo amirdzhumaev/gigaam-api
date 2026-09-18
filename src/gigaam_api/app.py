@@ -172,25 +172,62 @@ def create_app(settings: Settings | None = None):
             raise HTTPException(409, "Повтор доступен только для завершившейся ошибкой задачи")
         return public_job(row)
 
-    @app.delete("/v1/transcriptions/{ident}", status_code=204)
-    def delete(ident: str, who: str = Depends(owner)):
-        row = owned(ident, who)
+    def purge(who, ident=None, key=None):
         with engine.begin() as db:
+            condition = jobs.c.id == ident if ident else jobs.c.idempotency_key == key
+            row = (
+                db.execute(select(jobs).where(condition, jobs.c.owner == who).with_for_update())
+                .mappings()
+                .first()
+            )
+            if not row and key:
+                tombstone = new_job(who, uid(), "transcription", {}, key)
+                tombstone["state"] = "deleted"
+                try:
+                    with db.begin_nested():
+                        db.execute(jobs.insert().values(**tombstone))
+                    row = tombstone
+                except IntegrityError:
+                    row = (
+                        db.execute(select(jobs).where(condition, jobs.c.owner == who).with_for_update())
+                        .mappings()
+                        .one()
+                    )
+            if not row:
+                raise HTTPException(404, "Задача не найдена")
+            path = row["payload"].get("path") or row["payload"].get("pending_delete_path")
+            ident = row["id"]
             db.execute(
                 update(jobs)
                 .where(jobs.c.id == ident)
                 .values(
                     state="deleted",
                     result=None,
-                    payload={},
+                    payload={"pending_delete_path": path} if path else {},
                     lease_token=None,
                     lease_until=None,
                     updated_at=now(),
                 )
             )
-        if row["payload"].get("path"):
-            Path(row["payload"]["path"]).unlink(missing_ok=True)
+        # Retain only the deletion path if the filesystem is temporarily unavailable.
+        if path:
+            Path(path).unlink(missing_ok=True)
+            with engine.begin() as db:
+                db.execute(
+                    update(jobs).where(jobs.c.id == ident, jobs.c.state == "deleted").values(payload={})
+                )
         return Response(status_code=204)
+
+    @app.delete("/v1/transcriptions/{ident}", status_code=204)
+    def delete(ident: str, who: str = Depends(owner)):
+        return purge(who, ident=ident)
+
+    @app.delete("/v1/requests/{key}", status_code=204)
+    def cancel_request(key: str, who: str = Depends(owner)):
+        if not 1 <= len(key) <= 200:
+            raise HTTPException(422, "Ключ должен содержать от 1 до 200 символов")
+        # Tombstoning the unique owner/key pair also blocks a late or repeated upload.
+        return purge(who, key=key)
 
     @app.post("/internal/jobs/claim", dependencies=[Depends(worker)])
     def claim_job(response: Response):

@@ -46,3 +46,7 @@ jobs:
         run: cp .env.example .env && docker compose config --quiet
       - name: Build API image
         run: docker build --target api -t gigaam-api:ci .
+      - name: Build and import worker runtime without downloading weights
+        run: |
+          docker build --target worker -t gigaam-worker:ci .
+          docker run --rm gigaam-worker:ci python -c 'import onnx_asr; import gigaam_api.worker'

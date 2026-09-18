@@ -6,8 +6,9 @@ from sqlalchemy import MetaData, create_engine, pool
 
 from gigaam_api.queue import job_table
 
-Path("data").mkdir(exist_ok=True)
-url = os.environ.get("ASR_DATABASE_URL", "sqlite:///data/asr.db")
+storage = Path(os.environ.get("ASR_STORAGE", "data/asr")).resolve()
+storage.mkdir(parents=True, exist_ok=True)
+url = os.environ.get("ASR_DATABASE_URL", f"sqlite:///{storage / 'asr.db'}")
 target_metadata = MetaData()
 job_table(target_metadata)
 
