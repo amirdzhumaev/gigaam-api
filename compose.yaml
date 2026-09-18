@@ -1,0 +1,67 @@
+name: gigaam-api
+x-api: &api
+  build:
+    context: .
+    target: api
+  environment: &environment
+    ASR_DATABASE_URL: postgresql+psycopg://asr:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@asr-db:5432/asr
+    ASR_STORAGE: /data
+    ASR_API_KEYS: ${ASR_API_KEYS:?Set ASR_API_KEYS}
+    ASR_WORKER_TOKEN: ${ASR_WORKER_TOKEN:?Set ASR_WORKER_TOKEN}
+    MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-268435456}
+  volumes: [asr-data:/data]
+  networks: [voice-notes]
+  security_opt: [no-new-privileges:true]
+services:
+  asr-db:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: asr
+      POSTGRES_USER: asr
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+    volumes: [asr-db:/var/lib/postgresql/data]
+    networks: [voice-notes]
+    restart: unless-stopped
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -U asr]
+      interval: 5s
+      retries: 15
+  migrate:
+    <<: *api
+    command: [alembic, upgrade, head]
+    depends_on:
+      asr-db: {condition: service_healthy}
+  asr-api:
+    <<: *api
+    ports: ["127.0.0.1:8100:8100"]
+    restart: unless-stopped
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://localhost:8100/healthz')"]
+      interval: 10s
+      retries: 10
+  worker:
+    profiles: [local-worker]
+    build:
+      context: .
+      target: worker
+    environment:
+      ASR_API_URL: http://asr-api:8100
+      ASR_WORKER_TOKEN: ${ASR_WORKER_TOKEN:?Set ASR_WORKER_TOKEN}
+      ASR_MODEL: ${ASR_MODEL:-gigaam-v3-e2e-rnnt}
+      ASR_QUANTIZATION: ${ASR_QUANTIZATION:-int8}
+      MAX_AUDIO_SECONDS: ${MAX_AUDIO_SECONDS:-14400}
+    volumes: [models:/models]
+    networks: [voice-notes]
+    restart: unless-stopped
+    security_opt: [no-new-privileges:true]
+    depends_on:
+      asr-api: {condition: service_healthy}
+networks:
+  voice-notes:
+    external: true
+volumes:
+  asr-data:
+  asr-db:
+  models:
