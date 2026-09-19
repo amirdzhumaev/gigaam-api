@@ -27,7 +27,14 @@ def public_addresses(host, port):
     return addresses
 
 
-def download_public(url: str, destination: Path, limit: int):
+def download_public(url: str, destination: Path, limit: int, *, headers=None):
+    request_headers = {"User-Agent": "gigaam-api/0.1", "Accept-Encoding": "identity"}
+    for key, value in (headers or {}).items():
+        if key.lower() not in {"user-agent", "referer", "origin"} or not isinstance(value, str):
+            raise ValueError("Недопустимый заголовок источника")
+        if len(value) > 2048 or any(ord(c) < 32 or ord(c) > 126 for c in value):
+            raise ValueError("Недопустимый заголовок источника")
+        request_headers[key.title()] = value
     deadline = time.monotonic() + 300
     for _ in range(6):
         parsed = validate_url(url)
@@ -43,9 +50,7 @@ def download_public(url: str, destination: Path, limit: int):
             target = parsed.path or "/"
             if parsed.query:
                 target += "?" + parsed.query
-            conn.request(
-                "GET", target, headers={"User-Agent": "gigaam-api/0.1", "Accept-Encoding": "identity"}
-            )
+            conn.request("GET", target, headers=request_headers)
             response = conn.getresponse()
             if response.status in {301, 302, 303, 307, 308}:
                 location = response.getheader("Location")

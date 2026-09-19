@@ -69,3 +69,11 @@ def test_redirect_to_private_address_blocked(monkeypatch, tmp_path):
     with pytest.raises(ValueError):
         download_public("http://public.example/media", tmp_path / "file", 100)
     assert connected == [("8.8.8.8", 80)]
+
+
+@pytest.mark.parametrize(
+    "headers", [{"Cookie": "private"}, {"Host": "internal"}, {"User-Agent": "ok\r\nInjected: header"}]
+)
+def test_extractor_cannot_inject_headers_or_credentials(tmp_path, headers):
+    with pytest.raises(ValueError):
+        download_public("https://public.example/media", tmp_path / "file", 100, headers=headers)

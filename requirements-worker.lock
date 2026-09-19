@@ -22,6 +22,8 @@ click==8.5.0
     # via
     #   huggingface-hub
     #   uvicorn
+deno==2.9.5
+    # via gigaam-api (pyproject.toml)
 fastapi==0.141.1
     # via gigaam-api (pyproject.toml)
 filelock==4.0.0
@@ -103,4 +105,8 @@ typing-inspection==0.4.4
     #   fastapi
     #   pydantic
 uvicorn==0.53.0
+    # via gigaam-api (pyproject.toml)
+yt-dlp==2026.8.19
+    # via gigaam-api (pyproject.toml)
+yt-dlp-ejs==0.8.0
     # via gigaam-api (pyproject.toml)

@@ -12,7 +12,7 @@ from pathlib import Path
 
 import httpx
 
-from .download import download_public
+from .page_import import PageImportError, download_source
 from .schemas import Segment, Transcript
 
 log = logging.getLogger("gigaam.worker")
@@ -127,7 +127,7 @@ def process_one(client: httpx.Client, recognizer) -> bool:
             root = Path(directory)
             media = root / "source"
             if job["source"] == "url":
-                download_public(job["url"], media, job["max_upload_bytes"])
+                download_source(job["url"], media, job["max_upload_bytes"])
             else:
                 with client.stream(
                     "GET", f"/internal/jobs/{ident}/media", headers={"X-Lease-Token": token}
@@ -153,16 +153,20 @@ def process_one(client: httpx.Client, recognizer) -> bool:
     except Exception as exc:
         # No transcript, URL, token or upstream response body is written to logs.
         code = (
-            "invalid_media"
-            if isinstance(exc, (ValueError, subprocess.CalledProcessError))
-            else "asr_unavailable"
+            exc.code
+            if isinstance(exc, PageImportError)
+            else (
+                "invalid_media"
+                if isinstance(exc, (ValueError, subprocess.CalledProcessError))
+                else "asr_unavailable"
+            )
         )
         log.warning("Job %s failed (%s)", ident, type(exc).__name__)
         if not lost.is_set():
             try:
                 client.post(
                     f"/internal/jobs/{ident}/fail",
-                    json={"lease_token": token, "code": code, "retryable": code != "invalid_media"},
+                    json={"lease_token": token, "code": code, "retryable": code == "asr_unavailable"},
                 ).raise_for_status()
             except httpx.HTTPError:
                 log.warning("Failure acknowledgement unavailable; lease will expire")

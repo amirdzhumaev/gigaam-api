@@ -1,0 +1,25 @@
+# Standalone compute worker. The API and durable queue may run on another host.
+name: gigaam-remote
+services:
+  worker:
+    build:
+      context: .
+      target: worker
+    init: true
+    environment:
+      ASR_API_URL: ${ASR_API_URL:?Set the remote HTTPS API URL}
+      ASR_WORKER_TOKEN: ${ASR_WORKER_TOKEN:?Set the worker token}
+      ASR_MODEL: ${ASR_MODEL:-gigaam-v3-e2e-rnnt}
+      ASR_QUANTIZATION: ${ASR_QUANTIZATION:-int8}
+      MAX_AUDIO_SECONDS: ${MAX_AUDIO_SECONDS:-14400}
+      MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-268435456}
+    volumes: [models:/models]
+    restart: unless-stopped
+    stop_grace_period: 30s
+    mem_limit: ${ASR_WORKER_MEMORY:-4g}
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+volumes:
+  models:
+    external: true
+    name: ${ASR_MODEL_VOLUME:-gigaam-api_models}
