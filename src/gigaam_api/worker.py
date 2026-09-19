@@ -181,6 +181,7 @@ def main():
     parser.add_argument("--once", action="store_true")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
     token = os.environ["ASR_WORKER_TOKEN"]
     with httpx.Client(
         base_url=os.environ.get("ASR_API_URL", "http://127.0.0.1:8100"),

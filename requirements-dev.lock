@@ -83,3 +83,5 @@ typing-inspection==0.4.4
     #   pydantic
 uvicorn==0.53.0
     # via gigaam-api (pyproject.toml)
+yt-dlp==2026.8.19
+    # via gigaam-api (pyproject.toml)
