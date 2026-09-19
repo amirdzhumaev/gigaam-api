@@ -1,3 +1,4 @@
+import json
 import socket
 import sys
 import threading
@@ -308,6 +309,29 @@ def test_extractor_subprocess_json_timeout_output_and_exit_limits(tmp_path):
         )
     with pytest.raises(PageImportError, match="page_import_failed"):
         run_extractor([sys.executable, "-c", "raise SystemExit(2)"], tmp_path)
+
+
+def test_real_ytdlp_cli_emits_metadata_without_download_limit_exit(tmp_path):
+    # Exercise the pinned CLI, not a mocked extractor subprocess. --max-downloads
+    # 1 used to exit 101 before --dump-single-json could emit its first result,
+    # even though --skip-download was enabled. No network/media is needed here.
+    fixture = tmp_path / "video.info.json"
+    fixture.write_text(
+        json.dumps(
+            metadata(
+                id="fixture",
+                title="Offline fixture",
+                extractor="youtube",
+                webpage_url="https://www.youtube.com/watch?v=abcdefghijk",
+            )
+        )
+    )
+    command = extractor_command("https://www.youtube.com/watch?v=abcdefghijk", "http://127.0.0.1:9")
+    command = command[:-2] + ["--load-info-json", str(fixture)]
+    result = run_extractor(command, tmp_path)
+    assert result["id"] == "fixture"
+    assert select_media(result, max_bytes=1000, max_duration=200)[0] == "https://cdn.example/media"
+    assert list(tmp_path.iterdir()) == [fixture]
 
 
 def test_child_network_uses_proxy_even_for_loopback_target(tmp_path):

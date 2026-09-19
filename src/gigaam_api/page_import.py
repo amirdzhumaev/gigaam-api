@@ -281,8 +281,6 @@ def extractor_command(url, proxy_url):
         "--no-playlist",
         "--use-extractors",
         "youtube$,vk$",
-        "--max-downloads",
-        "1",
         "--socket-timeout",
         "10",
         "--retries",
