@@ -129,3 +129,23 @@ def test_cancellation_recovers_after_lost_submission_response(api):
     assert api.get(f"/v1/transcriptions/{ident}").status_code == 404
     assert not list((api.app.state.settings.storage / "media").iterdir())
     assert api.delete(f"/v1/transcriptions/{ident}").status_code == 204
+
+
+def test_download_failure_is_not_mislabeled_as_corrupt_audio(api, worker, monkeypatch):
+    from gigaam_api import worker as worker_module
+    from gigaam_api.download import DownloadError
+
+    class UnusedRecognizer:
+        def transcribe(self, *args):
+            raise AssertionError("Incomplete downloads must never be transcribed")
+
+    for code in ("download_timeout", "download_too_large", "download_failed"):
+
+        def failed_download(*args):
+            raise DownloadError(code)
+
+        monkeypatch.setattr(worker_module, "download_source", failed_download)
+        job = api.post("/v1/imports", json={"url": "https://public.example/audio.mp3"}).json()
+        assert process_one(worker, UnusedRecognizer())
+        status = api.get(f"/v1/transcriptions/{job['id']}").json()
+        assert status["state"] == "failed" and status["error_code"] == code

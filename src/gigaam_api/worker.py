@@ -12,6 +12,7 @@ from pathlib import Path
 
 import httpx
 
+from .download import DownloadError
 from .page_import import PageImportError, download_source
 from .schemas import Segment, Transcript
 
@@ -154,14 +155,14 @@ def process_one(client: httpx.Client, recognizer) -> bool:
         # No transcript, URL, token or upstream response body is written to logs.
         code = (
             exc.code
-            if isinstance(exc, PageImportError)
+            if isinstance(exc, (PageImportError, DownloadError))
             else (
                 "invalid_media"
                 if isinstance(exc, (ValueError, subprocess.CalledProcessError))
                 else "asr_unavailable"
             )
         )
-        log.warning("Job %s failed (%s)", ident, type(exc).__name__)
+        log.warning("Job %s failed (%s, code=%s)", ident, type(exc).__name__, code)
         if not lost.is_set():
             try:
                 client.post(

@@ -12,6 +12,7 @@ services:
       ASR_MODEL: ${ASR_MODEL:-gigaam-v3-e2e-rnnt}
       ASR_QUANTIZATION: ${ASR_QUANTIZATION:-int8}
       MAX_AUDIO_SECONDS: ${MAX_AUDIO_SECONDS:-14400}
+      MEDIA_DOWNLOAD_TIMEOUT: ${MEDIA_DOWNLOAD_TIMEOUT:-1800}
       MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-268435456}
     volumes: [models:/models]
     restart: unless-stopped
