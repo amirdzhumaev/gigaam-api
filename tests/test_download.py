@@ -77,3 +77,79 @@ def test_redirect_to_private_address_blocked(monkeypatch, tmp_path):
 def test_extractor_cannot_inject_headers_or_credentials(tmp_path, headers):
     with pytest.raises(ValueError):
         download_public("https://public.example/media", tmp_path / "file", 100, headers=headers)
+
+
+def fake_transfer(monkeypatch, chunks, *, seconds_per_chunk=0, status=200, read_timeout=False):
+    """Exercise the downloader without waiting for a slow public server."""
+    from gigaam_api import download
+
+    clock = [0]
+    content = iter(chunks)
+
+    class Connection:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def request(self, *args, **kwargs):
+            pass
+
+        def getresponse(self):
+            return self
+
+        def getheader(self, key, default=None):
+            return default
+
+        def read(self, _):
+            if read_timeout:
+                raise TimeoutError()
+            chunk = next(content, b"")
+            if chunk:
+                clock[0] += seconds_per_chunk
+            return chunk
+
+        def close(self):
+            pass
+
+    Connection.status = status
+    monkeypatch.setattr(download, "public_addresses", lambda *_: ["8.8.8.8"])
+    monkeypatch.setattr(download.socket, "create_connection", lambda *a, **k: object())
+    monkeypatch.setattr(download.http.client, "HTTPConnection", Connection)
+    monkeypatch.setattr(download.time, "monotonic", lambda: clock[0])
+
+
+def test_slow_download_can_exceed_old_five_minute_limit(monkeypatch, tmp_path):
+    monkeypatch.delenv("MEDIA_DOWNLOAD_TIMEOUT", raising=False)
+    fake_transfer(monkeypatch, [b"first", b"second", b"last"], seconds_per_chunk=110)
+    destination = tmp_path / "audio"
+    download_public("http://public.example/audio", destination, 100)
+    assert destination.read_bytes() == b"firstsecondlast"
+
+
+@pytest.mark.parametrize(
+    "timeout,chunks,limit,seconds,status,read_timeout,code",
+    [
+        (300, [b"a", b"b"], 100, 150, 200, False, "download_timeout"),
+        (1800, [b"audio"], 4, 1, 200, False, "download_too_large"),
+        (1800, [], 100, 0, 403, False, "download_failed"),
+        (1800, [], 100, 0, 200, True, "download_timeout"),
+    ],
+)
+def test_download_limits_have_distinct_safe_codes(
+    monkeypatch, tmp_path, timeout, chunks, limit, seconds, status, read_timeout, code
+):
+    from gigaam_api.download import DownloadError
+
+    monkeypatch.setenv("MEDIA_DOWNLOAD_TIMEOUT", str(timeout))
+    fake_transfer(monkeypatch, chunks, seconds_per_chunk=seconds, status=status, read_timeout=read_timeout)
+    with pytest.raises(DownloadError) as error:
+        download_public("http://public.example/audio", tmp_path / "audio", limit)
+    assert error.value.code == code and str(error.value) == code
+
+
+@pytest.mark.parametrize("value", ["nan", "inf", "0", "-10", "3601", "invalid"])
+def test_download_timeout_cannot_disable_resource_bound(monkeypatch, value):
+    from gigaam_api.download import download_timeout
+
+    monkeypatch.setenv("MEDIA_DOWNLOAD_TIMEOUT", value)
+    with pytest.raises(ValueError):
+        download_timeout()

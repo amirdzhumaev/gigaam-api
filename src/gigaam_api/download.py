@@ -2,11 +2,28 @@
 
 import http.client
 import ipaddress
+import math
+import os
 import socket
 import ssl
 import time
 from pathlib import Path
 from urllib.parse import urljoin, urlsplit
+
+
+class DownloadError(ValueError):
+    """Safe source-transfer failure code, separate from invalid audio."""
+
+    def __init__(self, code):
+        self.code = code
+        super().__init__(code)
+
+
+def download_timeout():
+    value = float(os.environ.get("MEDIA_DOWNLOAD_TIMEOUT", "1800"))
+    if not math.isfinite(value) or not 1 <= value <= 3600:
+        raise ValueError("MEDIA_DOWNLOAD_TIMEOUT must be between 1 and 3600 seconds")
+    return value
 
 
 def validate_url(url):
@@ -35,8 +52,10 @@ def download_public(url: str, destination: Path, limit: int, *, headers=None):
         if len(value) > 2048 or any(ord(c) < 32 or ord(c) > 126 for c in value):
             raise ValueError("Недопустимый заголовок источника")
         request_headers[key.title()] = value
-    deadline = time.monotonic() + 300
+    deadline = time.monotonic() + download_timeout()
     for _ in range(6):
+        if time.monotonic() >= deadline:
+            raise DownloadError("download_timeout")
         parsed = validate_url(url)
         port = parsed.port or (443 if parsed.scheme == "https" else 80)
         address = public_addresses(parsed.hostname, port)[0]
@@ -59,7 +78,7 @@ def download_public(url: str, destination: Path, limit: int, *, headers=None):
                 url = urljoin(url, location)
                 continue
             if response.status != 200:
-                raise ValueError("Источник не отдал медиафайл")
+                raise DownloadError("download_failed")
             content_type = response.getheader("Content-Type", "").lower()
             if "text/html" in content_type or "application/json" in content_type:
                 raise ValueError("Поддерживаются прямые ссылки на файлы, а не страницы сайтов")
@@ -67,12 +86,16 @@ def download_public(url: str, destination: Path, limit: int, *, headers=None):
             with destination.open("wb") as output:
                 while chunk := response.read(256 * 1024):
                     size += len(chunk)
-                    if size > limit or time.monotonic() > deadline:
-                        raise ValueError("Превышен размер файла или время загрузки")
+                    if size > limit:
+                        raise DownloadError("download_too_large")
+                    if time.monotonic() >= deadline:
+                        raise DownloadError("download_timeout")
                     output.write(chunk)
             if not size:
                 raise ValueError("Источник вернул пустой файл")
             return
+        except TimeoutError:
+            raise DownloadError("download_timeout") from None
         finally:
             conn.close()
     raise ValueError("Слишком много перенаправлений")
