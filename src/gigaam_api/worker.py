@@ -4,10 +4,12 @@ import argparse
 import json
 import logging
 import os
+import shutil
 import subprocess
 import tempfile
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 import httpx
@@ -18,6 +20,26 @@ from .schemas import Segment, Transcript
 
 log = logging.getLogger("gigaam.worker")
 FORMATS = "wav,mp3,mov,ogg,flac,aac,matroska,webm"
+
+
+@contextmanager
+def scratch_storage():
+    """A dedicated disk directory survives restarts; abandoned inputs do not."""
+    configured = os.environ.get("ASR_SCRATCH_DIR")
+    if not configured:
+        yield
+        return
+    import fcntl
+
+    root = Path(configured)
+    root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with (root / ".worker.lock").open("a") as lock:
+        # One worker owns this directory. Do not prune another worker's current recording.
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        for path in root.glob("gigaam-*"):
+            if path.is_dir() and not path.is_symlink():
+                shutil.rmtree(path)
+        yield
 
 
 class GigaAM:
@@ -124,7 +146,9 @@ def process_one(client: httpx.Client, recognizer) -> bool:
     thread = threading.Thread(target=pulse, daemon=True)
     thread.start()
     try:
-        with tempfile.TemporaryDirectory(prefix="gigaam-") as directory:
+        with tempfile.TemporaryDirectory(
+            prefix="gigaam-", dir=os.environ.get("ASR_SCRATCH_DIR")
+        ) as directory:
             root = Path(directory)
             media = root / "source"
             if job["source"] == "url":
@@ -184,12 +208,15 @@ def main():
     logging.basicConfig(level=logging.INFO)
     logging.getLogger("httpx").setLevel(logging.WARNING)
     token = os.environ["ASR_WORKER_TOKEN"]
-    with httpx.Client(
-        base_url=os.environ.get("ASR_API_URL", "http://127.0.0.1:8100"),
-        headers={"Authorization": f"Bearer {token}"},
-        timeout=60,
-        trust_env=False,
-    ) as client:
+    with (
+        scratch_storage(),
+        httpx.Client(
+            base_url=os.environ.get("ASR_API_URL", "http://127.0.0.1:8100"),
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=60,
+            trust_env=False,
+        ) as client,
+    ):
         recognizer = GigaAM()
         while True:
             try:

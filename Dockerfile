@@ -19,7 +19,8 @@ FROM base AS worker
 RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 COPY requirements-worker.lock ./
-RUN pip install --no-cache-dir -r requirements-worker.lock && mkdir -p /models && chown app:app /models
+RUN pip install --no-cache-dir -r requirements-worker.lock \
+    && mkdir -p /models /scratch && chown app:app /models /scratch
 COPY pyproject.toml ./
 COPY src ./src
 RUN pip install --no-cache-dir --no-deps .

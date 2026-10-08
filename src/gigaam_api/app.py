@@ -11,6 +11,7 @@ from sqlalchemy import MetaData, select, text, update
 from sqlalchemy.exc import IntegrityError
 
 from .infra import authenticate, engine_for, keys_from_env, now, public_job, save_upload, uid
+from .media_cleanup import cleanup_terminal_media
 from .queue import claim, fail, finish, heartbeat, job_table, lease_condition, new_job
 from .schemas import Completion, Failure, Job, Lease, Transcript, URLImport
 
@@ -47,6 +48,7 @@ def create_app(settings: Settings | None = None):
     engine = engine_for(cfg.database_url)
     if engine.dialect.name == "sqlite":
         metadata.create_all(engine)
+    cleanup_terminal_media(engine, jobs)
 
     @asynccontextmanager
     async def lifespan(_):
@@ -156,12 +158,18 @@ def create_app(settings: Settings | None = None):
 
     @app.post("/v1/transcriptions/{ident}/retry", status_code=202, response_model=Job)
     def retry(ident: str, who: str = Depends(owner)):
-        owned(ident, who)
+        original = owned(ident, who)
+        if original["payload"].get("source") == "file" and not original["payload"].get("path"):
+            raise HTTPException(409, "source_media_deleted")
         with engine.begin() as db:
             row = (
                 db.execute(
                     update(jobs)
-                    .where(jobs.c.id == ident, jobs.c.state == "failed")
+                    .where(
+                        jobs.c.id == ident,
+                        jobs.c.state == "failed",
+                        jobs.c.updated_at == original["updated_at"],
+                    )
                     .values(state="queued", attempts=0, error_code=None, available_at=now(), updated_at=now())
                     .returning(jobs)
                 )
@@ -232,6 +240,7 @@ def create_app(settings: Settings | None = None):
     @app.post("/internal/jobs/claim", dependencies=[Depends(worker)])
     def claim_job(response: Response):
         row = claim(engine, jobs)
+        cleanup_terminal_media(engine, jobs)
         if not row:
             response.status_code = 204
             return None
@@ -264,12 +273,14 @@ def create_app(settings: Settings | None = None):
     def complete(ident: str, body: Completion):
         if not finish(engine, jobs, ident, body.lease_token, body.result.model_dump()):
             raise HTTPException(409, "Аренда задачи истекла")
+        cleanup_terminal_media(engine, jobs)
         return {"ok": True}
 
     @app.post("/internal/jobs/{ident}/fail", dependencies=[Depends(worker)])
     def failed(ident: str, body: Failure):
         if not fail(engine, jobs, ident, body.lease_token, body.code, body.retryable):
             raise HTTPException(409, "Аренда задачи истекла")
+        cleanup_terminal_media(engine, jobs)
         return {"ok": True}
 
     return app

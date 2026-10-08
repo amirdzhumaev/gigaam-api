@@ -55,6 +55,7 @@ def test_worker_roundtrip_and_restart(api, worker):
     result = api.get(f"/v1/transcriptions/{ident}/result").json()
     assert result["segments"][0]["start"] == 0
     assert result["text"] == "Обсудили релиз."
+    assert not list((api.app.state.settings.storage / "media").iterdir())
 
 
 def test_stale_lease_and_delete_reject_late_completion(api, worker):
@@ -89,7 +90,7 @@ def test_concurrent_workers_claim_each_job_once(api):
     assert len(ids) == len(set(ids)) == 12
 
 
-def test_invalid_media_is_terminal_and_retry_is_explicit(api, worker):
+def test_invalid_media_is_removed_and_requires_new_upload(api, worker):
     class BadRecognizer:
         def transcribe(self, *_):
             raise ValueError("invalid media")
@@ -98,7 +99,8 @@ def test_invalid_media_is_terminal_and_retry_is_explicit(api, worker):
     process_one(worker, BadRecognizer())
     failed = api.get(f"/v1/transcriptions/{ident}").json()
     assert (failed["state"], failed["error_code"]) == ("failed", "invalid_media")
-    assert api.post(f"/v1/transcriptions/{ident}/retry").json()["state"] == "queued"
+    assert api.post(f"/v1/transcriptions/{ident}/retry").status_code == 409
+    assert not list((api.app.state.settings.storage / "media").iterdir())
 
 
 def test_invalid_timestamps_rejected(api, worker):
@@ -149,3 +151,78 @@ def test_download_failure_is_not_mislabeled_as_corrupt_audio(api, worker, monkey
         assert process_one(worker, UnusedRecognizer())
         status = api.get(f"/v1/transcriptions/{job['id']}").json()
         assert status["state"] == "failed" and status["error_code"] == code
+
+
+def test_retryable_failure_retains_input_until_attempts_are_exhausted(api, worker):
+    ident = upload(api).json()["id"]
+    media = api.app.state.settings.storage / "media"
+    for attempt in range(3):
+        with api.app.state.engine.begin() as db:
+            db.execute(
+                update(api.app.state.jobs).where(api.app.state.jobs.c.id == ident).values(available_at=0)
+            )
+        job = worker.post("/internal/jobs/claim").json()
+        assert (
+            worker.post(
+                f"/internal/jobs/{ident}/fail",
+                json={
+                    "lease_token": job["lease_token"],
+                    "code": "asr_unavailable",
+                    "retryable": True,
+                },
+            ).status_code
+            == 200
+        )
+        assert bool(list(media.iterdir())) == (attempt < 2)
+    assert api.get(f"/v1/transcriptions/{ident}").json()["state"] == "failed"
+
+
+def test_expired_last_lease_removes_terminal_input(api, worker):
+    ident = upload(api).json()["id"]
+    worker.post("/internal/jobs/claim")
+    with api.app.state.engine.begin() as db:
+        db.execute(
+            update(api.app.state.jobs)
+            .where(api.app.state.jobs.c.id == ident)
+            .values(attempts=3, lease_until=0)
+        )
+    assert worker.post("/internal/jobs/claim").status_code == 204
+    assert not list((api.app.state.settings.storage / "media").iterdir())
+
+
+def test_failed_unlink_is_durable_and_retried_without_losing_transcript(api, worker, monkeypatch):
+    from pathlib import Path
+
+    from sqlalchemy import select
+
+    from gigaam_api.media_cleanup import cleanup_terminal_media
+
+    ident = upload(api).json()["id"]
+    job = worker.post("/internal/jobs/claim").json()
+    unlink = Path.unlink
+
+    def unavailable(self, *args, **kwargs):
+        if self.parent == api.app.state.settings.storage / "media":
+            raise OSError("filesystem unavailable")
+        return unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", unavailable)
+    assert (
+        worker.post(
+            f"/internal/jobs/{ident}/complete",
+            json={
+                "lease_token": job["lease_token"],
+                "result": {"model": "test", "duration": 0, "text": "", "segments": []},
+            },
+        ).status_code
+        == 200
+    )
+    assert api.get(f"/v1/transcriptions/{ident}/result").status_code == 200
+    with api.app.state.engine.connect() as db:
+        payload = db.execute(
+            select(api.app.state.jobs.c.payload).where(api.app.state.jobs.c.id == ident)
+        ).scalar()
+    assert "path" not in payload and payload["pending_delete_path"]
+    monkeypatch.setattr(Path, "unlink", unlink)
+    cleanup_terminal_media(api.app.state.engine, api.app.state.jobs)
+    assert not list((api.app.state.settings.storage / "media").iterdir())
