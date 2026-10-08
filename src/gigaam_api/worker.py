@@ -48,6 +48,7 @@ class GigaAM:
         self.model_name = os.environ.get("ASR_MODEL", "gigaam-v3-e2e-rnnt")
 
     def transcribe(self, source: Path, root: Path):
+        started = time.monotonic()
         probe = subprocess.run(
             [
                 "ffprobe",
@@ -70,6 +71,7 @@ class GigaAM:
         duration = float(json.loads(probe.stdout)["format"]["duration"])
         if not 0 < duration <= float(os.environ.get("MAX_AUDIO_SECONDS", 14400)):
             raise ValueError("unsupported_duration")
+        log.info("Media duration_seconds=%.2f; decoding audio", duration)
         wav = root / "audio.wav"
         subprocess.run(
             [
@@ -96,15 +98,21 @@ class GigaAM:
             timeout=600,
             check=True,
         )
+        log.info("Audio decoded elapsed_seconds=%.2f", time.monotonic() - started)
         if self.model is None:
             import onnx_asr
 
+            load_started = time.monotonic()
+            log.info("Loading ASR model and VAD")
             model = onnx_asr.load_model(
                 self.model_name,
                 quantization=os.environ.get("ASR_QUANTIZATION", "int8") or None,
                 providers=["CPUExecutionProvider"],
             )
             self.model = model.with_vad(onnx_asr.load_vad("silero"), max_speech_duration_s=25, batch_size=1)
+            log.info("ASR model and VAD loaded elapsed_seconds=%.2f", time.monotonic() - load_started)
+        recognized_at = time.monotonic()
+        log.info("Transcription started duration_seconds=%.2f", duration)
         segments = []
         for index, part in enumerate(self.model.recognize(str(wav))):
             text = part.text.strip()
@@ -114,6 +122,13 @@ class GigaAM:
                         id=f"s{index}", start=float(part.start), end=min(duration, float(part.end)), text=text
                     )
                 )
+        elapsed = time.monotonic() - recognized_at
+        log.info(
+            "Transcription finished elapsed_seconds=%.2f realtime_factor=%.4f segments=%d",
+            elapsed,
+            elapsed / duration,
+            len(segments),
+        )
         return Transcript(
             model=self.model_name,
             duration=duration,
@@ -129,6 +144,8 @@ def process_one(client: httpx.Client, recognizer) -> bool:
     response.raise_for_status()
     job = response.json()
     ident, token = job["id"], job["lease_token"]
+    started = time.monotonic()
+    log.info("Started job %s source_kind=%s", ident, job["source"])
     stop = threading.Event()
     lost = threading.Event()
 
@@ -151,6 +168,8 @@ def process_one(client: httpx.Client, recognizer) -> bool:
         ) as directory:
             root = Path(directory)
             media = root / "source"
+            downloaded_at = time.monotonic()
+            log.info("Job %s download started", ident)
             if job["source"] == "url":
                 download_source(job["url"], media, job["max_upload_bytes"])
             else:
@@ -165,6 +184,12 @@ def process_one(client: httpx.Client, recognizer) -> bool:
                             if size > job["max_upload_bytes"]:
                                 raise ValueError("file_too_large")
                             target.write(chunk)
+            log.info(
+                "Job %s downloaded bytes=%d elapsed_seconds=%.2f",
+                ident,
+                media.stat().st_size,
+                time.monotonic() - downloaded_at,
+            )
             if lost.is_set():
                 return True
             result = recognizer.transcribe(media, root)
@@ -174,7 +199,7 @@ def process_one(client: httpx.Client, recognizer) -> bool:
                     json={"lease_token": token, "result": result.model_dump()},
                 )
                 r.raise_for_status()
-                log.info("Completed job %s", ident)
+                log.info("Completed job %s elapsed_seconds=%.2f", ident, time.monotonic() - started)
     except Exception as exc:
         # No transcript, URL, token or upstream response body is written to logs.
         code = (
@@ -186,7 +211,13 @@ def process_one(client: httpx.Client, recognizer) -> bool:
                 else "asr_unavailable"
             )
         )
-        log.warning("Job %s failed (%s, code=%s)", ident, type(exc).__name__, code)
+        log.warning(
+            "Job %s failed (%s, code=%s) elapsed_seconds=%.2f",
+            ident,
+            type(exc).__name__,
+            code,
+            time.monotonic() - started,
+        )
         if not lost.is_set():
             try:
                 client.post(
@@ -205,7 +236,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--once", action="store_true")
     args = parser.parse_args()
-    logging.basicConfig(level=logging.INFO)
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     logging.getLogger("httpx").setLevel(logging.WARNING)
     token = os.environ["ASR_WORKER_TOKEN"]
     with (
