@@ -9,11 +9,12 @@ import subprocess
 import tempfile
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from pathlib import Path
 
 import httpx
 
+from .audio_chunks import wav_chunks
 from .download import DownloadError
 from .page_import import PageImportError, download_source
 from .schemas import Segment, Transcript
@@ -114,14 +115,23 @@ class GigaAM:
         recognized_at = time.monotonic()
         log.info("Transcription started duration_seconds=%.2f", duration)
         segments = []
-        for index, part in enumerate(self.model.recognize(str(wav))):
-            text = part.text.strip()
-            if text:
-                segments.append(
-                    Segment(
-                        id=f"s{index}", start=float(part.start), end=min(duration, float(part.end)), text=text
-                    )
-                )
+        # onnx-asr loads its input into NumPy before VAD. Give it at most five
+        # minutes, rather than a multi-hour waveform that can exhaust Pi RAM.
+        with closing(wav_chunks(wav, root / "chunk.wav")) as chunks:
+            for offset, chunk_duration, chunk_path in chunks:
+                for part in self.model.recognize(str(chunk_path)):
+                    text = part.text.strip()
+                    if text:
+                        end = min(duration, offset + chunk_duration, offset + float(part.end))
+                        segments.append(
+                            Segment(
+                                id=f"s{len(segments)}",
+                                start=min(end, offset + max(0, float(part.start))),
+                                end=end,
+                                text=text,
+                            )
+                        )
+                log.info("Transcription progress audio_seconds=%.2f", offset + chunk_duration)
         elapsed = time.monotonic() - recognized_at
         log.info(
             "Transcription finished elapsed_seconds=%.2f realtime_factor=%.4f segments=%d",
