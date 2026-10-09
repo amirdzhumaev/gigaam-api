@@ -294,7 +294,11 @@ def extractor_command(url, proxy_url):
         proxy_url,
         "--ignore-no-formats-error",
         "--format",
-        "bestaudio[protocol=https]/best[protocol=https]",
+        (
+            "bestaudio[protocol=https]"
+            if validate_url(url).hostname in YOUTUBE_HOSTS
+            else "bestaudio[protocol=https]/best[protocol=https]"
+        ),
         "--",
         url,
     ]
@@ -397,6 +401,8 @@ def select_media(info, *, max_bytes, max_duration):
         # VK progressive MP4 metadata omits codecs. Reject explicitly silent
         # streams; ffmpeg validates whether an unknown-codec file has audio.
         if item.get("acodec") == "none":
+            continue
+        if info["extractor_key"] == "Youtube" and item.get("vcodec") != "none":
             continue
         size = item.get("filesize")
         if size is not None and (not isinstance(size, (int, float)) or not 0 < size <= max_bytes):

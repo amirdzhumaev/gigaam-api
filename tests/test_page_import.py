@@ -151,9 +151,15 @@ def test_manifests_drm_oversized_or_silent_formats_not_downloaded(override):
 def test_video_fallback_prefers_smaller_resolution():
     first = metadata()["formats"][0] | {"vcodec": "h264", "height": 720}
     second = first | {"height": 240, "url": "https://cdn.example/small"}
-    assert select_media(metadata(formats=[first, second]), max_bytes=1000, max_duration=200)[0].endswith(
-        "small"
-    )
+    assert select_media(
+        metadata(extractor_key="VK", formats=[first, second]), max_bytes=1000, max_duration=200
+    )[0].endswith("small")
+
+
+def test_youtube_never_falls_back_to_video():
+    video = metadata()["formats"][0] | {"vcodec": "h264"}
+    with pytest.raises(PageImportError, match="unsupported_video_format"):
+        select_media(metadata(formats=[video]), max_bytes=1000, max_duration=200)
 
 
 def test_vk_progressive_format_does_not_require_codec_metadata():
@@ -297,6 +303,9 @@ def test_extractor_does_not_inherit_keys_configs_or_browser_access(monkeypatch, 
     assert "--no-cookies-from-browser" in cmd and "--ignore-config" in cmd
     assert cmd[cmd.index("--proxy") + 1] == "http://safe-proxy"
     assert cmd[cmd.index("--use-extractors") + 1] == "youtube$,vk$"
+    assert cmd[cmd.index("--format") + 1] == "bestaudio[protocol=https]"
+    vk = extractor_command("https://vkvideo.ru/video-123_456", "http://safe-proxy")
+    assert vk[vk.index("--format") + 1] == "bestaudio[protocol=https]/best[protocol=https]"
 
 
 def test_extractor_subprocess_json_timeout_output_and_exit_limits(tmp_path):
