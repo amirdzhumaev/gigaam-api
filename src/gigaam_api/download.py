@@ -82,6 +82,26 @@ def _copy_response(response, sock, output, size, limit, deadline, expected):
     return size
 
 
+def _googlevideo_host(hostname):
+    return re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.googlevideo\.com", hostname) is not None
+
+
+def _googlevideo_tls(sock, hostname):
+    """Omit CDN SNI but still require a trusted chain and the original DNS name."""
+    if not _googlevideo_host(hostname):
+        raise ValueError("SNI fallback is restricted to Google video hosts")
+    context = ssl.create_default_context()
+    context.check_hostname = False
+    # OpenSSL still verifies the complete chain, validity and server purpose.
+    secured = context.wrap_socket(sock)
+    names = {name.lower() for kind, name in secured.getpeercert().get("subjectAltName", ()) if kind == "DNS"}
+    # Only an exact name or this single-label wildcard can identify this CDN.
+    if hostname not in names and "*.googlevideo.com" not in names:
+        secured.close()
+        raise ssl.SSLCertVerificationError("Certificate does not identify the requested CDN host")
+    return secured
+
+
 def download_public(url: str, destination: Path, limit: int, *, headers=None, chunk_bytes=None):
     """Pin every request, optionally fetching sequential validated byte ranges."""
     if chunk_bytes is not None and (not isinstance(chunk_bytes, int) or chunk_bytes <= 0):
@@ -95,6 +115,7 @@ def download_public(url: str, destination: Path, limit: int, *, headers=None, ch
         request_headers[key.title()] = value
     deadline = time.monotonic() + download_timeout()
     size, total, redirects = 0, None, 0
+    without_sni = set()
     with destination.open("wb") as output:
         while True:
             _remaining_timeout(deadline)
@@ -107,7 +128,23 @@ def download_public(url: str, destination: Path, limit: int, *, headers=None, ch
                 sock = socket.create_connection((address, port), timeout=_remaining_timeout(deadline))
                 conn.sock = sock
                 if parsed.scheme == "https":
-                    sock = ssl.create_default_context().wrap_socket(sock, server_hostname=parsed.hostname)
+                    if parsed.hostname in without_sni:
+                        sock = _googlevideo_tls(sock, parsed.hostname)
+                    else:
+                        try:
+                            sock = ssl.create_default_context().wrap_socket(
+                                sock, server_hostname=parsed.hostname
+                            )
+                        except TimeoutError:
+                            if not _googlevideo_host(parsed.hostname):
+                                raise
+                            conn.close()
+                            sock = socket.create_connection(
+                                (address, port), timeout=_remaining_timeout(deadline)
+                            )
+                            conn.sock = sock
+                            sock = _googlevideo_tls(sock, parsed.hostname)
+                            without_sni.add(parsed.hostname)
                     conn.sock = sock
                 sock.settimeout(_remaining_timeout(deadline))
                 target = parsed.path or "/"
@@ -161,5 +198,7 @@ def download_public(url: str, destination: Path, limit: int, *, headers=None, ch
                     return
             except TimeoutError:
                 raise DownloadError("download_timeout") from None
+            except ssl.SSLError:
+                raise DownloadError("download_failed") from None
             finally:
                 conn.close()
