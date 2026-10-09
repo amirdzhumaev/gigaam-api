@@ -444,4 +444,6 @@ def download_source(url, destination, limit):
     media_url, headers = select_media(
         metadata, max_bytes=limit, max_duration=float(os.environ.get("MAX_AUDIO_SECONDS", "14400"))
     )
-    return download_public(media_url, destination, limit, headers=headers)
+    # YouTube's full-body transfers can be much slower than byte-range requests.
+    options = {"chunk_bytes": 1024 * 1024} if metadata.get("extractor_key") == "Youtube" else {}
+    return download_public(media_url, destination, limit, headers=headers, **options)

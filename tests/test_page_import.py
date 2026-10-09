@@ -363,6 +363,12 @@ def test_download_source_keeps_direct_urls_and_gates_page_metadata(monkeypatch, 
     monkeypatch.setattr(page_import, "run_extractor", extract)
     download_source("https://youtu.be/abcdefghijk?si=ignored", destination, 1000)
     assert observed[0][-1] == "https://www.youtube.com/watch?v=abcdefghijk"
+    assert downloaded[-1] == (
+        ("https://cdn.example/media", destination, 1000),
+        {"headers": {}, "chunk_bytes": 1024 * 1024},
+    )
+    monkeypatch.setattr(page_import, "run_extractor", lambda *a, **kw: metadata(extractor_key="VK"))
+    download_source("https://vkvideo.ru/video-123_456", destination, 1000)
     assert downloaded[-1] == (("https://cdn.example/media", destination, 1000), {"headers": {}})
 
 

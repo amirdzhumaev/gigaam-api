@@ -1,4 +1,5 @@
 import socket
+from types import SimpleNamespace
 
 import pytest
 
@@ -64,7 +65,12 @@ def test_redirect_to_private_address_blocked(monkeypatch, tmp_path):
             pass
 
     monkeypatch.setattr(socket, "getaddrinfo", dns)
-    monkeypatch.setattr(socket, "create_connection", lambda addr, **kw: connected.append(addr))
+
+    def connect(addr, **kw):
+        connected.append(addr)
+        return SimpleNamespace(settimeout=lambda _: None)
+
+    monkeypatch.setattr(socket, "create_connection", connect)
     monkeypatch.setattr(download.http.client, "HTTPConnection", Connection)
     with pytest.raises(ValueError):
         download_public("http://public.example/media", tmp_path / "file", 100)
@@ -80,29 +86,40 @@ def test_extractor_cannot_inject_headers_or_credentials(tmp_path, headers):
 
 
 def fake_transfer(monkeypatch, chunks, *, seconds_per_chunk=0, status=200, read_timeout=False):
+    return fake_responses(
+        monkeypatch,
+        [(status, {}, chunks)],
+        seconds_per_chunk=seconds_per_chunk,
+        read_timeout=read_timeout,
+    )
+
+
+def fake_responses(monkeypatch, responses, *, seconds_per_chunk=0, read_timeout=False):
     """Exercise the downloader without waiting for a slow public server."""
     from gigaam_api import download
 
     clock = [0]
-    content = iter(chunks)
+    replies = iter(responses)
+    requests, timeouts = [], []
 
     class Connection:
         def __init__(self, *args, **kwargs):
-            pass
+            self.status, self.headers, chunks = next(replies)
+            self.content = iter(chunks)
 
         def request(self, *args, **kwargs):
-            pass
+            requests.append(kwargs["headers"])
 
         def getresponse(self):
             return self
 
         def getheader(self, key, default=None):
-            return default
+            return self.headers.get(key, default)
 
-        def read(self, _):
+        def read1(self, _):
             if read_timeout:
                 raise TimeoutError()
-            chunk = next(content, b"")
+            chunk = next(self.content, b"")
             if chunk:
                 clock[0] += seconds_per_chunk
             return chunk
@@ -110,11 +127,15 @@ def fake_transfer(monkeypatch, chunks, *, seconds_per_chunk=0, status=200, read_
         def close(self):
             pass
 
-    Connection.status = status
     monkeypatch.setattr(download, "public_addresses", lambda *_: ["8.8.8.8"])
-    monkeypatch.setattr(download.socket, "create_connection", lambda *a, **k: object())
+    monkeypatch.setattr(
+        download.socket,
+        "create_connection",
+        lambda *a, **k: SimpleNamespace(settimeout=timeouts.append),
+    )
     monkeypatch.setattr(download.http.client, "HTTPConnection", Connection)
     monkeypatch.setattr(download.time, "monotonic", lambda: clock[0])
+    return requests, timeouts
 
 
 def test_slow_download_can_exceed_old_five_minute_limit(monkeypatch, tmp_path):
@@ -153,3 +174,116 @@ def test_download_timeout_cannot_disable_resource_bound(monkeypatch, value):
     monkeypatch.setenv("MEDIA_DOWNLOAD_TIMEOUT", value)
     with pytest.raises(ValueError):
         download_timeout()
+
+
+def test_ranges_assemble_file_in_order_with_short_final_range(monkeypatch, tmp_path):
+    requests, _ = fake_responses(
+        monkeypatch,
+        [
+            (206, {"Content-Range": "bytes 0-3/10", "Content-Length": "4"}, [b"ab", b"cd"]),
+            (206, {"Content-Range": "bytes 4-7/10"}, [b"efgh"]),
+            (206, {"Content-Range": "bytes 8-9/10"}, [b"ij"]),
+        ],
+    )
+    destination = tmp_path / "audio"
+    download_public("http://public.example/audio", destination, 10, chunk_bytes=4)
+    assert destination.read_bytes() == b"abcdefghij"
+    assert [r["Range"] for r in requests] == ["bytes=0-3", "bytes=4-7", "bytes=8-11"]
+
+
+def test_range_ignored_on_first_request_falls_back_to_bounded_full_body(monkeypatch, tmp_path):
+    requests, _ = fake_transfer(monkeypatch, [b"audio"])
+    destination = tmp_path / "audio"
+    download_public("http://public.example/audio", destination, 5, chunk_bytes=4)
+    assert destination.read_bytes() == b"audio"
+    assert len(requests) == 1
+
+
+@pytest.mark.parametrize(
+    "headers,body,code",
+    [
+        ({}, b"abcd", "download_failed"),
+        ({"Content-Range": "bytes 1-4/10"}, b"abcd", "download_failed"),
+        ({"Content-Range": "bytes 0-4/10"}, b"abcde", "download_failed"),
+        ({"Content-Range": "bytes 0-3/*"}, b"abcd", "download_failed"),
+        ({"Content-Range": "bytes 0-3/3"}, b"abcd", "download_failed"),
+        ({"Content-Range": "bytes 0-3/10", "Content-Length": "3"}, b"abc", "download_failed"),
+        ({"Content-Range": "bytes 0-3/10"}, b"abc", "download_failed"),
+        ({"Content-Range": "bytes 0-3/10"}, b"abcde", "download_failed"),
+        ({"Content-Range": "bytes 0-3/11"}, b"abcd", "download_too_large"),
+    ],
+)
+def test_bad_or_oversized_ranges_are_rejected(monkeypatch, tmp_path, headers, body, code):
+    from gigaam_api.download import DownloadError
+
+    fake_responses(monkeypatch, [(206, headers, [body])])
+    with pytest.raises(DownloadError, match=code):
+        download_public("http://public.example/audio", tmp_path / "audio", 10, chunk_bytes=4)
+
+
+@pytest.mark.parametrize(
+    "second",
+    [
+        (200, {}, [b"abcdefgh"]),
+        (206, {"Content-Range": "bytes 4-7/9"}, [b"efgh"]),
+        (206, {"Content-Range": "bytes 0-3/8"}, [b"abcd"]),
+    ],
+)
+def test_range_stream_cannot_restart_overlap_or_change_total(monkeypatch, tmp_path, second):
+    from gigaam_api.download import DownloadError
+
+    fake_responses(monkeypatch, [(206, {"Content-Range": "bytes 0-3/8"}, [b"abcd"]), second])
+    with pytest.raises(DownloadError, match="download_failed"):
+        download_public("http://public.example/audio", tmp_path / "audio", 10, chunk_bytes=4)
+    assert (tmp_path / "audio").read_bytes() == b"abcd"
+
+
+def test_ranges_share_one_deadline_and_shrink_socket_timeout(monkeypatch, tmp_path):
+    from gigaam_api.download import DownloadError
+
+    monkeypatch.setenv("MEDIA_DOWNLOAD_TIMEOUT", "3")
+    requests, timeouts = fake_responses(
+        monkeypatch,
+        [
+            (206, {"Content-Range": "bytes 0-3/8"}, [b"abcd"]),
+            (206, {"Content-Range": "bytes 4-7/8"}, [b"efgh"]),
+        ],
+        seconds_per_chunk=2,
+    )
+    with pytest.raises(DownloadError, match="download_timeout"):
+        download_public("http://public.example/audio", tmp_path / "audio", 10, chunk_bytes=4)
+    assert len(requests) == 2 and timeouts[-1] == 1
+
+
+def test_each_range_revalidates_dns_before_connecting(monkeypatch, tmp_path):
+    from gigaam_api import download
+
+    requests, _ = fake_responses(monkeypatch, [(206, {"Content-Range": "bytes 0-3/8"}, [b"abcd"])])
+    addresses = iter([["8.8.8.8"], ["127.0.0.1"]])
+    monkeypatch.setattr(socket, "getaddrinfo", lambda *a, **k: [(0, 0, 0, "", (next(addresses)[0], 80))])
+    monkeypatch.setattr(download, "public_addresses", public_addresses)
+    with pytest.raises(ValueError, match="запрещены"):
+        download_public("http://public.example/audio", tmp_path / "audio", 10, chunk_bytes=4)
+    assert len(requests) == 1
+
+
+@pytest.mark.parametrize("length", ["6", "invalid", "-1"])
+def test_full_body_cannot_be_truncated_or_have_invalid_length(monkeypatch, tmp_path, length):
+    from gigaam_api.download import DownloadError
+
+    fake_responses(monkeypatch, [(200, {"Content-Length": length}, [b"audio"])])
+    with pytest.raises(DownloadError, match="download_failed"):
+        download_public("http://public.example/audio", tmp_path / "audio", 10)
+
+
+def test_connection_timeout_has_safe_download_code(monkeypatch, tmp_path):
+    from gigaam_api.download import DownloadError
+
+    fake_transfer(monkeypatch, [])
+
+    def timeout(*args, **kwargs):
+        raise TimeoutError()
+
+    monkeypatch.setattr(socket, "create_connection", timeout)
+    with pytest.raises(DownloadError, match="download_timeout"):
+        download_public("http://public.example/audio", tmp_path / "audio", 10)
